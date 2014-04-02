@@ -1,0 +1,391 @@
+//#include <PID_v1.h>
+#include <Servo.h>
+//#include <uSTimer2.h>
+//#include <CharliePlexM.h>
+#include <avr/interrupt.h>
+#define USECS 50
+
+Servo servo_Left_Motor; 
+Servo servo_Right_Motor;
+
+const int ci_Left_Motor = 9;
+const int ci_Right_Motor = 8;
+
+const int ci_sidef_ultrasonic_Ping = 14;
+const int ci_sidef_ultrasonic_Data = 15;
+const int ci_sideb_ultrasonic_Ping = 16;
+const int ci_sideb_ultrasonic_Data = 17;
+/*const int ci_front_ultrasonic_Ping = 16;
+ const int ci_front_ultrasonic_Data = 17;
+ const int ci_back_ultrasonic_Ping = 18;
+ const int ci_back_ultrasonic_Data = 19;*/
+
+const int ci_door_light = 11;
+const int ci_start_button = 12;
+const int ci_start_light = 13;
+
+const int motor_basespeed = 500;
+const int motor_maxspeed = 700;
+const int motor_minspeed = 300;
+const int motor_increment = 10;
+const int motor_max_turn = 200;
+const int ultrasonic_threshold = 50;
+const int ultrasonic_wall = 1000;
+const int ultrasonic_door = 1200;
+const int encoder_threshold = 20;
+const int max_error = 250;
+
+const int loopPeriod = 50;
+unsigned long timeLoopDelay = 50;
+
+int Left_MotorSpeed = 1500;
+int Right_MotorSpeed = 1500;
+
+int sidef_echo_time;
+int sideb_echo_time;
+//int front_echo_time;
+//int back_echo_time;
+int target_echo_time = ultrasonic_wall;
+int startButtonInput = LOW;
+int countedDoors = 0;
+int dir = 1;
+boolean start = false;
+boolean seeingDoor = false;
+
+////////////////////////////////////ENCODERS//////////////////////////////////////
+volatile unsigned long TimerCount;
+volatile char TimerOverflowing;
+volatile unsigned int TimerPreload;
+
+//Pin connections
+const int left_enc_chA = 2;
+const int left_enc_chB = 3;
+const int right_enc_chA = 4;
+const int right_enc_chB = 5;
+
+//Current encoder value
+long left_enc_val = 0;
+long right_enc_val = 0;
+
+//Time in (ms) between last two encoder counts, can be used for velocity
+unsigned long left_enc_time = 0;
+unsigned long right_enc_time = 0;
+
+//Private use
+int left_enc_state = 0;
+int left_enc_stateA = 0;
+int left_enc_stateB = 0;
+int right_enc_state = 0;
+int right_enc_stateA = 0;
+int right_enc_stateB = 0;
+int left_enc_pos = 0;
+int left_enc_neg = 0;
+int right_enc_pos = 0;
+int right_enc_neg = 0;
+unsigned long left_enc_prevtime = 0;
+unsigned long right_enc_prevtime = 0;
+//////////////////////////////////////////////////////////////////////////////////
+
+void setup()
+{
+  Serial.begin(9600);
+
+  // ultrasonic sensor pin configurations
+  pinMode(ci_sidef_ultrasonic_Ping, OUTPUT);
+  pinMode(ci_sidef_ultrasonic_Data, INPUT);
+  pinMode(ci_sideb_ultrasonic_Ping, OUTPUT);
+  pinMode(ci_sideb_ultrasonic_Data, INPUT);
+  /*pinMode(ci_front_ultrasonic_Ping, OUTPUT);
+   pinMode(ci_front_ultrasonic_Data, INPUT);
+   pinMode(ci_back_ultrasonic_Ping, OUTPUT);
+   pinMode(ci_back_ultrasonic_Data, INPUT);*/
+
+  pinMode(ci_start_light, OUTPUT);
+
+  pinMode(ci_Left_Motor, OUTPUT);
+  servo_Left_Motor.attach(ci_Left_Motor);
+
+  pinMode(ci_Right_Motor, OUTPUT);
+  servo_Right_Motor.attach(ci_Right_Motor);
+
+  pinMode(ci_start_button, INPUT);
+  digitalWrite(ci_start_button, HIGH); //enabling pull-up resistor
+
+  pinMode(ci_start_light, OUTPUT);
+  
+  pinMode(ci_door_light, OUTPUT);
+  digitalWrite(ci_start_button, LOW);
+
+  setupTimer();
+  startTimer2();
+}
+
+
+void loop()
+{
+  if(millis() - timeLoopDelay >= loopPeriod)
+  {
+    timeLoopDelay = millis();
+
+    if (!start)
+    {
+      startButtonInput = digitalRead(ci_start_button);
+      readUltrasonicSensors();
+      if (startButtonInput == LOW) 
+      {
+        start = true;
+      }
+    } 
+    else if (start)
+    {
+      readUltrasonicSensors();
+      navigate();
+      if (countedDoors == 4) 
+      {
+        servo_Left_Motor.write(200); 
+        servo_Right_Motor.write(200);
+        delay (1000);
+        dir *= -1;
+        countedDoors = 0;  
+      }
+    }
+  }
+}
+
+void readUltrasonicSensors()
+{  
+  digitalWrite(ci_sidef_ultrasonic_Ping, HIGH);
+  delayMicroseconds(10);                  // must keep the trig pin high for at least 10us
+  digitalWrite(ci_sidef_ultrasonic_Ping, LOW);
+
+  sidef_echo_time = pulseIn(ci_sidef_ultrasonic_Data, HIGH, 10000);
+  Serial.print("Side Front:");
+  Serial.print(sidef_echo_time);
+
+  digitalWrite(ci_sideb_ultrasonic_Ping, HIGH);
+  delayMicroseconds(10);                  // must keep the trig pin high for at least 10us
+  digitalWrite(ci_sideb_ultrasonic_Ping, LOW);
+
+  sideb_echo_time = pulseIn(ci_sideb_ultrasonic_Data, HIGH, 10000);
+  Serial.print("\tSide Back:");
+  Serial.println(sideb_echo_time);
+
+  /*digitalWrite(ci_back_ultrasonic_Ping, HIGH);
+   delayMicroseconds(10);                  // must keep the trig pin high for at least 10us
+   digitalWrite(ci_back_ultrasonic_Ping, LOW);
+   
+   back_echo_time = pulseIn(ci_back_ultrasonic_Data, HIGH, 10000);
+   Serial.print("Front: \t");
+   Serial.println(front_echo_time);
+   
+   digitalWrite(ci_front_ultrasonic_Ping, HIGH);
+   delayMicroseconds(10);                  // must keep the trig pin high for at least 10us
+   digitalWrite(ci_front_ultrasonic_Ping, LOW);
+   
+   front_echo_time = pulseIn(ci_front_ultrasonic_Data, HIGH, 10000);
+   Serial.print("Front: \t");
+   Serial.println(front_echo_time);*/
+
+  //turn led 13 on if the bot is the right distance from the wall
+  if ((sidef_echo_time <= (ultrasonic_wall + ultrasonic_threshold)) && (sidef_echo_time >= (ultrasonic_wall - ultrasonic_threshold)) && (sideb_echo_time <= (ultrasonic_wall + ultrasonic_threshold)) && (sideb_echo_time >= ( - ultrasonic_threshold)))
+  {
+    digitalWrite(ci_start_light, HIGH); 
+  }
+  else 
+  {
+    digitalWrite(ci_start_light, LOW); 
+  }
+}
+
+void navigate()
+{
+  if (((sidef_echo_time > ultrasonic_door) || (sideb_echo_time > ultrasonic_door)) && !seeingDoor)
+  {
+    seeingDoor = true;
+    countedDoors++;
+    servo_Left_Motor.write(1500 + dir*motor_basespeed); 
+    servo_Right_Motor.write(1500 + dir*motor_basespeed);
+    digitalWrite(ci_door_light, HIGH);
+  }
+  else if ((sidef_echo_time < ultrasonic_door) && (sideb_echo_time < ultrasonic_door) && seeingDoor)
+  {
+    seeingDoor = false;
+    countedDoors++;
+    digitalWrite(ci_door_light, LOW);
+  }
+
+  if (!seeingDoor)
+  {
+    followWall();
+  }
+
+  Serial.print("Counted doors: ");
+  Serial.println(countedDoors);
+
+  //Serial.print("Left Motor Speed:\t");
+  //Serial.print(Left_MotorSpeed);
+  //Serial.print("\tRight Motor Speed:\t");
+  //Serial.println(Right_MotorSpeed);
+}
+
+void followWall()
+{
+  //average of ultrasonics determines angle//adjust motor speeds to achieve desired angle
+  //13 inches between ultrasonics = 1924
+  double distance_error = constrain((sidef_echo_time + sideb_echo_time)/2.0 - target_echo_time, -500.0, 500.0);  //try not averaging (just using one)
+
+  double target_angle = map(distance_error, -500, 500, -1360, 1360);                //not actually an angle, just the difference between front and back ultrasonics
+  double angle_error = ((sideb_echo_time - sidef_echo_time) - target_angle)/500.0;      //make params for max error
+
+  Left_MotorSpeed = 1500 + dir*motor_basespeed - angle_error*motor_max_turn;
+  Right_MotorSpeed = 1500 + dir*motor_basespeed + angle_error*motor_max_turn;
+
+  servo_Left_Motor.write(Left_MotorSpeed); 
+  servo_Right_Motor.write(Right_MotorSpeed);
+
+  //Serial.print("Distance Error:\t");
+  //Serial.print(distance_error);
+  //Serial.print("\tAngle Error:\t");
+  //Serial.print(angle_error);
+}
+
+void setupTimer() {
+  // Setup Timer2
+
+  float prescaler = 0.0;
+  TIMSK2 &= ~(1<<TOIE2);
+  TCCR2A &= ~((1<<WGM21) | (1<<WGM20));
+  TCCR2B &= ~(1<<WGM22);
+  ASSR &= ~(1<<AS2);
+  TIMSK2 &= ~(1<<OCIE2A);
+
+  if ((F_CPU >= 1000000UL) && (F_CPU <= 16000000UL)) {	// prescaler set to 64
+    TCCR2B |= (1<<CS22);
+    TCCR2B &= ~((1<<CS21) | (1<<CS20));
+    prescaler = 64.0;
+  } 
+  else if (F_CPU < 1000000UL) {	// prescaler set to 8
+    TCCR2B |= (1<<CS21);
+    TCCR2B &= ~((1<<CS22) | (1<<CS20));
+    prescaler = 8.0;
+  } 
+  else { // F_CPU > 16Mhz, prescaler set to 128
+    TCCR2B |= ((1<<CS22) | (1<<CS20));
+    TCCR2B &= ~(1<<CS21);
+    prescaler = 128.0;
+  }
+  TimerPreload = 256 - (int)((float)F_CPU * 0.00002795 / prescaler);
+  setupEncoders();
+  startTimer2();
+}
+
+void startTimer2() {
+  // Start Timer2
+  TimerCount = 0;
+  TimerOverflowing = 0;
+  TCNT2 = TimerPreload;
+  TIMSK2 |= (1<<TOIE2);
+}
+
+void stopTimer2() {
+  // Stop Timer2
+  TIMSK2 &= ~(1<<TOIE2);
+}
+
+void TimerOverflow() {
+  TimerCount += 1;
+  if (TimerCount >= USECS && !TimerOverflowing) {
+    TimerOverflowing = 1;
+    TimerCount = 0;
+
+    //INSERT ALL ENCODER CODE HERE
+    checkEncoders();
+    TimerOverflowing = 0;
+  }
+}
+
+ISR(TIMER2_OVF_vect) {
+  TCNT2 = TimerPreload;
+  TimerOverflow();
+}
+
+void setupEncoders()
+{
+  pinMode(left_enc_chA, INPUT);
+  pinMode(left_enc_chB, INPUT);
+  pinMode(right_enc_chA, INPUT);
+  pinMode(right_enc_chB, INPUT);
+
+  left_enc_stateA = digitalRead(left_enc_chA) & 1;
+  left_enc_stateB = digitalRead(left_enc_chB) & 1;
+  right_enc_stateA = digitalRead(right_enc_chA) & 1;
+  right_enc_stateB = digitalRead(right_enc_chB) & 1;
+
+  left_enc_pos = left_enc_neg = (left_enc_stateB << 1) | left_enc_stateA;
+  right_enc_pos = right_enc_neg = (right_enc_stateB << 1) | right_enc_stateA;
+  left_enc_pos = left_enc_pos ^ B10;
+  left_enc_neg = left_enc_neg ^ B01;
+  right_enc_pos = right_enc_pos ^ B10;
+  right_enc_neg = right_enc_neg ^ B01;
+  left_enc_prevtime = right_enc_prevtime = millis();
+}
+
+void checkEncoders()
+{
+  bool updateLeft = false, updateRight = false;
+
+  left_enc_stateA = digitalRead(left_enc_chA) & 1;
+  left_enc_stateB = digitalRead(left_enc_chB) & 1;
+  right_enc_stateA = digitalRead(right_enc_chA) & 1;
+  right_enc_stateB = digitalRead(right_enc_chB) & 1;
+
+  left_enc_state = (left_enc_stateA << 1) | left_enc_stateB;
+  right_enc_state = (right_enc_stateA << 1) | right_enc_stateB;
+
+  if(left_enc_state == left_enc_pos)
+  {
+    left_enc_val++;
+    updateLeft = true;
+  }
+  if(left_enc_state == left_enc_neg)
+  {
+    left_enc_val--;
+    updateLeft = true;
+  }
+  if(right_enc_state == right_enc_pos)
+  {
+    right_enc_val++;
+    updateRight = true;
+  }
+  if(right_enc_state == right_enc_neg)
+  {
+    right_enc_val--;
+    updateRight = true;
+  }
+
+  if(updateLeft)
+  {
+    left_enc_time = millis() - left_enc_prevtime;
+    left_enc_prevtime = millis();
+    left_enc_pos = left_enc_neg = (left_enc_stateB << 1) | left_enc_stateA;
+    left_enc_pos = left_enc_pos ^ B10;
+    left_enc_neg = left_enc_neg ^ B01;
+  }
+
+  if(updateRight)
+  {
+    right_enc_time = millis() - right_enc_prevtime;
+    right_enc_prevtime = millis();
+    right_enc_pos = right_enc_neg = (right_enc_stateB << 1) | right_enc_stateA;
+    right_enc_pos = right_enc_pos ^ B10;
+    right_enc_neg = right_enc_neg ^ B01;
+  }
+}
+
+
+
+
+
+
+
+
